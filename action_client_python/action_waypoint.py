@@ -165,8 +165,19 @@ class FollowWaypointsClient(Node):
 
     def get_result_callback(self, future):
         result = future.result().result
-        self.get_logger().info(f'Result: {result}')
-        rclpy.shutdown()
+        self.get_logger().info(f'Result: {result.missed_waypoints}')
+        try:
+            result_message = json.dumps({
+                'type': 'waypoint_result',
+                'sequence': result.missed_waypoints.tolist() 
+            })
+            if self.ws:
+                self.ws.send(result_message)
+                self.get_logger().info('Sent result back to WebSocket server')
+            else:
+                self.get_logger().warn('WebSocket not available to send result')
+        except Exception as e:
+            self.get_logger().error(f'Failed to send result over WebSocket: {e}')
     def destroy(self):
         if self.ws:
             self.ws.close()
