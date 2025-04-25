@@ -1,0 +1,72 @@
+# General development files
+*.swp
+*~
+.*.swp
+.*.swo
+.DS_Store
+.idea/
+.vscode/
+*.code-workspace
+
+# Build directories
+build/
+install/
+log/
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+
+# ROS 2 specific
+*.rosinstall
+*.repos
+*.lock
+
+# C/C++ compiled files
+*.o
+*.a
+*.so
+*.d
+*.dll
+*.exe
+
+# Python cache and virtual environments
+*.py[cod]
+__pycache__/
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Documentation
+docs/_build/
+docs/_out/
+docs/generated/
+
+# Eclipse and CLion IDE files
+.cproject
+.project
+.settings/
+cmake-build-*/
+
+# Colcon build artifacts
+*.log
+*.jou
+
+# Package specific ignores (uncomment if needed)
+# /msg/*.msg
+# /srv/*.srv
+# /action/*.action
+
+# Coverage files
+*.gcda
+*.gcno
+*.gcov
+
+# System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
