@@ -22,8 +22,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'fibonacci_action_client = action_client_python.action_client:main',
-            'fibonacci_action_client_socket = action_client_python.action_client_websocket:main',
             'action_client_waypoint = action_client_python.action_waypoint:main',
         ],
     },
