@@ -11,3 +11,7 @@ waypoints:
     x: 5.78
     y: -7.12
     theta: 0.0
+  T0:
+    x: 3.48
+    y: -6.28
+    theta: 0.0
