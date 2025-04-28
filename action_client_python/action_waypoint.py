@@ -48,6 +48,7 @@ class FollowWaypointsClient(Node):
                 data = json.loads(message)
                 if 'tray' in data:
                     print(f"{Colors.GREEN}Received valid table order: {data['tray']}{Colors.END}")
+                    data['tray'].append("T0")
                     self.send_goal(data['tray'])
                     print(data['tray'])
                 else:
