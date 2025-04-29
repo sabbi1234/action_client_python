@@ -37,6 +37,7 @@ class FollowWaypointsClient(Node):
         self.ws = None
         self.ws_thread = None
         self.connect_to_websocket("ws://localhost:48236")  # Change to your WebSocket server address
+        self.current_order_id = None
 
 
     def connect_to_websocket(self, ws_url):
@@ -48,6 +49,7 @@ class FollowWaypointsClient(Node):
                 data = json.loads(message)
                 if 'tray' in data:
                     print(f"{Colors.GREEN}Received valid table order: {data['tray']}{Colors.END}")
+                    self.current_order_id = data['order']
                     data['tray'].append("T0")
                     self.send_goal(data['tray'])
                     print(data['tray'])
@@ -170,6 +172,7 @@ class FollowWaypointsClient(Node):
         try:
             result_message = json.dumps({
                 'type': 'waypoint_result',
+                'order': self.current_order_id, 
                 'sequence': result.missed_waypoints.tolist() 
             })
             if self.ws:
@@ -204,8 +207,6 @@ def main(args=None):
 
     client = FollowWaypointsClient()
 
-    # waypoint_names = ['T1', 'T2', 'T3']
-    # client.send_goal(waypoint_names)
     try:
         # Keep the node running to process WebSocket messages and ROS callbacks
         rclpy.spin(client)
