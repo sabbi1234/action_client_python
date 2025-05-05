@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from std_msgs.msg import Empty
 from nav2_msgs.action import FollowWaypoints
 from geometry_msgs.msg import PoseStamped
 from tf_transformations import quaternion_from_euler
@@ -66,6 +67,7 @@ class FollowWaypointsClient(Node):
     def __init__(self):
         super().__init__('follow_waypoints_client')
         self._action_client = ActionClient(self, FollowWaypoints, '/follow_waypoints')
+        self.next_waypoint_publisher = self.create_publisher(Empty,'input_at_waypoint/input',10)
         self.waypoints_data = self.load_waypoints()
         self.ws = None
         self.ws_thread = None
@@ -82,14 +84,24 @@ class FollowWaypointsClient(Node):
         def on_message(ws, message):
             try:
                 data = json.loads(message)
-                if 'tray' in data:
-                    logger.info("Received valid table order: %s", data['tray'])
-                    self.current_order_id = data['order']
-                    data['tray'].append("T0")
-                    self.send_goal(data['tray'])
-                    logger.info("Waypoints to follow: %s", data['tray'])
-                else:
-                    logger.warning("Received data missing 'order' field")
+                if data.get('type') == "waypoint_order":
+                    logger.info(f"Received valid table order: {data['order']}")
+                    if 'tray' in data:
+                        logger.info("Received valid table order: %s", data['tray'])
+                        self.current_order_id = data['order']
+                        data['tray'].append("T0")
+                        self.send_goal(data['tray'])
+                        logger.info("Waypoints to follow: %s", data['tray'])
+                    else:
+                        logger.warning("Received data missing 'order' field")
+                elif data.get('type') == "waypoint_next":
+                    logger.info(f"Received valid result: {data['publish']}")
+                    if data['publish'] == True:
+                        self.publish_next_waypoint_signal()
+                        logger.info(f"Published next waypoint signal")
+                elif data.get('type') == "waypoint_cancel":
+                    logger.info(f"Cancelling all waypoints...")
+                    self._cancel_timer = self.create_timer(0.1, self._cancel_timer_callback)        
             except json.JSONDecodeError:
                 logger.error("Failed to parse WebSocket message as JSON")
             except Exception as e:
@@ -131,6 +143,35 @@ class FollowWaypointsClient(Node):
             self.ws_thread = threading.Thread(target=run_ws)
             self.ws_thread.daemon = True
             self.ws_thread.start()
+    
+    def publish_next_waypoint_signal(self):
+            msg = Empty()
+            self.next_waypoint_publisher.publish(msg)
+            logger.info(f"Published Empty to input_at_waypoint/input topic")
+        
+    def cancel_waypoints(self):
+        try:
+            if hasattr(self, '_send_goal_future') and self._send_goal_future.done():
+                goal_handle = self._send_goal_future.result()
+                
+                if goal_handle and goal_handle.accepted:
+                    cancel_future = goal_handle.cancel_goal_async()
+                    def cancel_done(future):
+                        if future.result():
+                            logger.info("Successfully canceled waypoint navigation!")
+                        else:
+                            logger.error("Failed to cancel waypoint navigation!")
+                    
+                    cancel_future.add_done_callback(cancel_done)
+                    return
+                    
+            logger.warning("No active goal to cancel or goal not yet accepted!")
+        except Exception as e:
+            logger.error(f"Error during cancellation: {e}")
+            
+    def _cancel_timer_callback(self):
+        self.destroy_timer(self._cancel_timer)
+        self.cancel_waypoints()
     
     def load_waypoints(self):
         config_path = os.path.join(
