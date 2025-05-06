@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from std_msgs.msg import Empty
-from nav2_msgs.action import FollowWaypoints
+from nav2_msgs.action import FollowWaypoints, NavigateToPose
 from geometry_msgs.msg import PoseStamped
 from tf_transformations import quaternion_from_euler
 import yaml
@@ -12,20 +12,19 @@ import json
 import threading
 import time
 import logging
-import sys  # Added for sys.stdout
+import sys
 from datetime import datetime
 from ament_index_python.packages import get_package_share_directory
 
 class ColorFormatter(logging.Formatter):
-    """Custom formatter that adds color to log levels"""
     COLORS = {
-        'DEBUG': '\033[96m',     # CYAN
-        'INFO': '\033[92m',      # GREEN
-        'WARNING': '\033[93m',   # YELLOW
-        'ERROR': '\033[91m',     # RED
-        'CRITICAL': '\033[91m',  # RED
+        'DEBUG': '[96m',
+        'INFO': '[92m',
+        'WARNING': '[93m',
+        'ERROR': '[91m',
+        'CRITICAL': '[91m',
     }
-    RESET = '\033[0m'
+    RESET = '[0m'
 
     def format(self, record):
         color = self.COLORS.get(record.levelname, '')
@@ -34,11 +33,9 @@ class ColorFormatter(logging.Formatter):
             message = f"{color}{message}{self.RESET}"
         return message
 
-# Create logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # Set the minimum logging level
+logger.setLevel(logging.INFO)
 
-# Create formatters
 file_formatter = logging.Formatter(
     '[%(asctime)s] %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
@@ -48,25 +45,22 @@ console_formatter = ColorFormatter(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Create file handler
 file_handler = logging.FileHandler(
-    filename='/home/sabbi/ros_link/rlog/action_client.log',
-    mode='a'  # 'a' for append, 'w' for overwrite
+    filename='/home/greenquest/Documents/bt_tree/src/action_client_python/scripts/action_client.log',
+    mode='a'
 )
 file_handler.setFormatter(file_formatter)
-
-# Create console handler that outputs to stdout
-console_handler = logging.StreamHandler(stream=sys.stdout)  # Changed to sys.stdout
+console_handler = logging.StreamHandler(stream=sys.stdout)
 console_handler.setFormatter(console_formatter)
 
-# Add handlers to the logger
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 class FollowWaypointsClient(Node):
     def __init__(self):
         super().__init__('follow_waypoints_client')
-        self._action_client = ActionClient(self, FollowWaypoints, '/follow_waypoints')
+        self._waypoint_action_client = ActionClient(self, FollowWaypoints, '/follow_waypoints')
+        self._pose_action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
         self.next_waypoint_publisher = self.create_publisher(Empty,'input_at_waypoint/input',10)
         self.waypoints_data = self.load_waypoints()
         self.ws = None
@@ -75,10 +69,10 @@ class FollowWaypointsClient(Node):
         self.current_order_id = None
         self.should_reconnect = True
         self.connected = False
+        self.current_goal_handle = None
         self.connect_to_websocket()
 
     def connect_to_websocket(self):
-        """Establish WebSocket connection with retry until connected"""
         logger.info("Attempting to connect to WebSocket at %s", self.ws_url)
 
         def on_message(ws, message):
@@ -95,21 +89,19 @@ class FollowWaypointsClient(Node):
                     else:
                         logger.warning("Received data missing 'order' field")
                 elif data.get('type') == "waypoint_next":
-                    logger.info(f"Received valid result: {data['publish']}")
-                    if data['publish'] == True:
+                    if data['publish']:
                         self.publish_next_waypoint_signal()
-                        logger.info(f"Published next waypoint signal")
                 elif data.get('type') == "waypoint_cancel":
                     logger.info(f"Cancelling all waypoints...")
-                    self._cancel_timer = self.create_timer(0.1, self._cancel_timer_callback)        
+                    self._cancel_timer = self.create_timer(0.1, self._cancel_timer_callback)
             except json.JSONDecodeError:
                 logger.error("Failed to parse WebSocket message as JSON")
             except Exception as e:
                 logger.error("Error processing message: %s", e)
-            
+
         def on_error(ws, error):
             logger.error("WebSocket error: %s", error)
-            
+
         def on_close(ws, close_status_code, close_msg):
             logger.error("WebSocket connection closed")
             self.connected = False
@@ -117,14 +109,13 @@ class FollowWaypointsClient(Node):
                 logger.warning("Attempting to reconnect...")
                 time.sleep(5)
                 self.connect_to_websocket()
-            
+
         def on_open(ws):
             logger.info("WebSocket connection established")
             self.connected = True
 
         def run_ws():
             while not self.connected and self.should_reconnect:
-                logger.info("Trying to connect...")
                 try:
                     self.ws = websocket.WebSocketApp(
                         self.ws_url,
@@ -137,42 +128,72 @@ class FollowWaypointsClient(Node):
                 except Exception as e:
                     logger.error("WebSocket run_forever exception: %s", e)
                     time.sleep(5)
-                    continue
 
         if self.ws_thread is None or not self.ws_thread.is_alive():
             self.ws_thread = threading.Thread(target=run_ws)
             self.ws_thread.daemon = True
             self.ws_thread.start()
-    
+
     def publish_next_waypoint_signal(self):
-            msg = Empty()
-            self.next_waypoint_publisher.publish(msg)
-            logger.info(f"Published Empty to input_at_waypoint/input topic")
-        
+        msg = Empty()
+        self.next_waypoint_publisher.publish(msg)
+        logger.info("Published Empty to input_at_waypoint/input topic")
+
     def cancel_waypoints(self):
         try:
-            if hasattr(self, '_send_goal_future') and self._send_goal_future.done():
-                goal_handle = self._send_goal_future.result()
-                
-                if goal_handle and goal_handle.accepted:
-                    cancel_future = goal_handle.cancel_goal_async()
-                    def cancel_done(future):
-                        if future.result():
-                            logger.info("Successfully canceled waypoint navigation!")
-                        else:
-                            logger.error("Failed to cancel waypoint navigation!")
-                    
-                    cancel_future.add_done_callback(cancel_done)
-                    return
-                    
-            logger.warning("No active goal to cancel or goal not yet accepted!")
+            if self.current_goal_handle is not None:
+                logger.info("Cancelling current waypoint navigation...")
+                self.publish_next_waypoint_signal()
+                time.sleep(0.1)
+                cancel_future = self.current_goal_handle.cancel_goal_async()
+                cancel_future.add_done_callback(self._cancel_waypoints_complete)
+            else:
+                logger.warning("No active goal to cancel. Proceeding to cancel pose.")
+                self.go_to_cancel_pose()
         except Exception as e:
             logger.error(f"Error during cancellation: {e}")
-            
+            self.go_to_cancel_pose()
+
+    def _cancel_waypoints_complete(self, future):
+        try:
+            cancel_response = future.result()
+            if cancel_response.goals_canceling:
+                logger.info("Successfully canceled waypoint navigation!")
+            else:
+                logger.warning("Failed to cancel goal or was already completed.")
+        except Exception as e:
+            logger.error(f"Error in cancellation callback: {e}")
+        time.sleep(2)
+        self.go_to_cancel_pose()
+
+    def go_to_cancel_pose(self):
+        pose = self.get_waypoint_by_name("T0")
+        if pose is None:
+            logger.error("T0 pose not found in waypoints file.")
+            return
+
+        goal = NavigateToPose.Goal()
+        goal.pose = pose
+
+        self._pose_action_client.wait_for_server()
+        logger.info("Sending navigation goal to cancel pose (T0)...")
+
+        nav_future = self._pose_action_client.send_goal_async(goal)
+
+        def on_result(future):
+            result = future.result()
+            if result.accepted:
+                logger.info("Navigation goal accepted. Waiting for result...")
+                result.get_result_async().add_done_callback(lambda r: logger.info("Reached cancel pose."))
+            else:
+                logger.warning("Navigation goal to cancel pose was rejected.")
+
+        nav_future.add_done_callback(on_result)
+
     def _cancel_timer_callback(self):
         self.destroy_timer(self._cancel_timer)
         self.cancel_waypoints()
-    
+
     def load_waypoints(self):
         config_path = os.path.join(
             get_package_share_directory('action_client_python'),
@@ -196,7 +217,7 @@ class FollowWaypointsClient(Node):
         if wp:
             return create_pose(wp['x'], wp['y'], wp['theta'])
         return None
-    
+
     def send_goal(self, waypoint_names):
         if not self.waypoints_data:
             logger.error("No waypoints data available!")
@@ -213,17 +234,14 @@ class FollowWaypointsClient(Node):
         if not waypoints:
             logger.error("No valid waypoints to follow!")
             return
-            
+
         goal_msg = FollowWaypoints.Goal()
         goal_msg.poses = waypoints
-        
-        logger.info('waypoint names: %s', waypoints)
-        logger.info('waiting for server...')
 
-        self._action_client.wait_for_server()
+        self._waypoint_action_client.wait_for_server()
         logger.info('Connected to action server')
-        
-        self._send_goal_future = self._action_client.send_goal_async(
+
+        self._send_goal_future = self._waypoint_action_client.send_goal_async(
             goal_msg,
             feedback_callback=self.feedback_callback
         )
@@ -240,6 +258,7 @@ class FollowWaypointsClient(Node):
             return
 
         logger.info('Goal accepted')
+        self.current_goal_handle = goal_handle
         self._get_result_future = goal_handle.get_result_async()
         self._get_result_future.add_done_callback(self.get_result_callback)
 
@@ -250,8 +269,8 @@ class FollowWaypointsClient(Node):
             if self.connected and self.ws:
                 result_message = json.dumps({
                     'type': 'waypoint_result',
-                    'order': self.current_order_id, 
-                    'sequence': result.missed_waypoints.tolist() 
+                    'order': self.current_order_id,
+                    'sequence': result.missed_waypoints.tolist()
                 })
                 self.ws.send(result_message)
                 logger.info('Sent result back to WebSocket server')
@@ -259,7 +278,7 @@ class FollowWaypointsClient(Node):
                 logger.warning('WebSocket not available to send result')
         except Exception as e:
             logger.error('Failed to send result over WebSocket: %s', e)
-            
+
     def destroy(self):
         self.should_reconnect = False
         if self.ws:
@@ -278,7 +297,7 @@ def create_pose(x, y, theta):
     pose.pose.orientation.x = q[0]
     pose.pose.orientation.y = q[1]
     pose.pose.orientation.z = q[2]
-    pose.pose.orientation.w = q[3]  
+    pose.pose.orientation.w = q[3]
     return pose
 
 def main(args=None):
