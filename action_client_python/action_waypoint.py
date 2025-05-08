@@ -5,6 +5,7 @@ from std_msgs.msg import Empty
 from nav2_msgs.action import FollowWaypoints, NavigateToPose
 from geometry_msgs.msg import PoseStamped
 from tf_transformations import quaternion_from_euler
+from std_msgs.msg import Int32
 import yaml
 import os
 import websocket
@@ -14,17 +15,18 @@ import time
 import logging
 import sys
 from datetime import datetime
+import queue
 from ament_index_python.packages import get_package_share_directory
 
 class ColorFormatter(logging.Formatter):
     COLORS = {
-        'DEBUG': '[96m',
-        'INFO': '[92m',
-        'WARNING': '[93m',
-        'ERROR': '[91m',
-        'CRITICAL': '[91m',
+        'DEBUG': '\033[96m',  # Light cyan
+        'INFO': '\033[92m',   # Light green
+        'WARNING': '\033[93m',# Yellow
+        'ERROR': '\033[91m',  # Red
+        'CRITICAL': '\033[91m',
     }
-    RESET = '[0m'
+    RESET = '\033[0m'
 
     def format(self, record):
         color = self.COLORS.get(record.levelname, '')
@@ -46,7 +48,7 @@ console_formatter = ColorFormatter(
 )
 
 file_handler = logging.FileHandler(
-    filename='/home/sabbi/ros_link/rlog/action_client.log',
+    filename='/home/greenquest/Documents/bt_tree/src/action_client_python/scripts/action_client.log',
     mode='a'
 )
 file_handler.setFormatter(file_formatter)
@@ -62,6 +64,8 @@ class FollowWaypointsClient(Node):
         self._waypoint_action_client = ActionClient(self, FollowWaypoints, '/follow_waypoints')
         self._pose_action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
         self.next_waypoint_publisher = self.create_publisher(Empty,'input_at_waypoint/input',10)
+        self.data_subscriber = self.create_subscription(Int32,'waypoint_reached',self.waypoint_reached_callback,10)
+        self.ws_message_queue = queue.Queue()
         self.waypoints_data = self.load_waypoints()
         self.ws = None
         self.ws_thread = None
@@ -70,69 +74,118 @@ class FollowWaypointsClient(Node):
         self.should_reconnect = True
         self.connected = False
         self.current_goal_handle = None
-        self.connect_to_websocket()
+        
+        # Start the WebSocket connection in a single thread
+        self.start_websocket_thread()
 
-    def connect_to_websocket(self):
-        logger.info("Attempting to connect to WebSocket at %s", self.ws_url)
+    def start_websocket_thread(self):
+        """Creates and starts a single WebSocket thread"""
+        if self.ws_thread is None or not self.ws_thread.is_alive():
+            self.ws_thread = threading.Thread(target=self.websocket_worker)
+            self.ws_thread.daemon = True
+            self.ws_thread.start()
+            
+    def websocket_worker(self):
+        """Main WebSocket worker that handles connections and reconnections"""
+        while self.should_reconnect:
+            try:
+                self.attempt_websocket_connection()
+                
+                # If we get here, the WebSocket connection has closed
+                # Wait before attempting to reconnect
+                if self.should_reconnect:
+                    logger.warning("WebSocket closed. Waiting 5 seconds before reconnecting...")
+                    time.sleep(5)
+            except Exception as e:
+                logger.error(f"WebSocket worker error: {e}")
+                if self.should_reconnect:
+                    logger.warning("Waiting 5 seconds before reconnecting...")
+                    time.sleep(5)
+                    
+        logger.info("WebSocket worker thread exiting")
 
+    def attempt_websocket_connection(self):
+        """Attempts to establish and maintain a single WebSocket connection"""
+        logger.info(f"Attempting to connect to WebSocket at {self.ws_url}")
+        
+        # Define callbacks
         def on_message(ws, message):
             try:
                 data = json.loads(message)
                 if data.get('type') == "waypoint_order":
                     logger.info(f"Received valid table order: {data['order']}")
                     if 'tray' in data:
-                        logger.info("Received valid table order: %s", data['tray'])
+                        logger.info(f"Received valid table order: {data['tray']}")
                         self.current_order_id = data['order']
                         data['tray'].append("T0")
                         self.send_goal(data['tray'])
-                        logger.info("Waypoints to follow: %s", data['tray'])
+                        logger.info(f"Waypoints to follow: {data['tray']}")
                     else:
                         logger.warning("Received data missing 'order' field")
                 elif data.get('type') == "waypoint_next":
                     if data['publish']:
                         self.publish_next_waypoint_signal()
                 elif data.get('type') == "waypoint_cancel":
-                    logger.info(f"Cancelling all waypoints...")
+                    logger.info("Cancelling all waypoints...")
                     self._cancel_timer = self.create_timer(0.1, self._cancel_timer_callback)
             except json.JSONDecodeError:
                 logger.error("Failed to parse WebSocket message as JSON")
             except Exception as e:
-                logger.error("Error processing message: %s", e)
+                logger.error(f"Error processing message: {e}")
 
         def on_error(ws, error):
-            logger.error("WebSocket error: %s", error)
+            logger.error(f"WebSocket error: {error}")
+            self.connected = False
 
         def on_close(ws, close_status_code, close_msg):
-            logger.error("WebSocket connection closed")
+            logger.error(f"WebSocket connection closed (code: {close_status_code}, message: {close_msg})")
             self.connected = False
-            if self.should_reconnect:
-                logger.warning("Attempting to reconnect...")
-                time.sleep(5)
-                self.connect_to_websocket()
+            # The reconnection is handled by the main websocket_worker loop
 
         def on_open(ws):
             logger.info("WebSocket connection established")
             self.connected = True
+            # Process any messages that were queued while disconnected
+            self.process_message_queue()
 
-        def run_ws():
-            while not self.connected and self.should_reconnect:
-                try:
-                    self.ws = websocket.WebSocketApp(
-                        self.ws_url,
-                        on_open=on_open,
-                        on_message=on_message,
-                        on_error=on_error,
-                        on_close=on_close
-                    )
-                    self.ws.run_forever()
-                except Exception as e:
-                    logger.error("WebSocket run_forever exception: %s", e)
-                    time.sleep(5)
-
-        if self.ws_thread is None or not self.ws_thread.is_alive():
-            self.ws_thread = threading.Thread(target=run_ws)
-            self.ws_thread.daemon = True
-            self.ws_thread.start()
+        # Create and run a new WebSocket connection
+        try:
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            # This blocks until the connection is closed
+            self.ws.run_forever()
+        finally:
+            self.connected = False
+            
+    def waypoint_reached_callback(self, msg):
+        try:
+            ws_message = {
+                'type': 'current_waypoint',
+                'order': self.current_order_id,
+                'content': msg.data 
+            }
+            self.ws_message_queue.put(ws_message)  # Thread-safe operation
+            
+            # Try to send the message right away if connected
+            self.process_message_queue()
+        except Exception as e:
+            logger.error(f"Failed to queue WS message: {e}")
+    
+    def process_message_queue(self):
+        """Process and send any messages in the queue if connected"""
+        if self.connected and self.ws:
+            try:
+                while not self.ws_message_queue.empty():
+                    message = self.ws_message_queue.get_nowait()
+                    self.ws.send(json.dumps(message))
+                    logger.info(f"Sent message from queue: {message['type']}")
+            except Exception as e:
+                logger.error(f"Error sending queued message: {e}")
 
     def publish_next_waypoint_signal(self):
         msg = Empty()
@@ -207,7 +260,7 @@ class FollowWaypointsClient(Node):
             logger.error("waypoints.yaml file not found!")
             return None
         except yaml.YAMLError as e:
-            logger.error("Error parsing YAML file: %s", e)
+            logger.error(f"Error parsing YAML file: {e}")
             return None
 
     def get_waypoint_by_name(self, name):
@@ -229,7 +282,7 @@ class FollowWaypointsClient(Node):
             if pose:
                 waypoints.append(pose)
             else:
-                logger.error("Waypoint %s not found!", name)
+                logger.error(f"Waypoint {name} not found!")
 
         if not waypoints:
             logger.error("No valid waypoints to follow!")
@@ -237,7 +290,7 @@ class FollowWaypointsClient(Node):
 
         goal_msg = FollowWaypoints.Goal()
         goal_msg.poses = waypoints
-
+        logger.info('Waiting for the action server....')
         self._waypoint_action_client.wait_for_server()
         logger.info('Connected to action server')
 
@@ -249,7 +302,7 @@ class FollowWaypointsClient(Node):
 
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
-        logger.info('Currently at waypoint index: %s', feedback.current_waypoint)
+        logger.info(f'Currently at waypoint index: {feedback.current_waypoint}')
 
     def goal_response_callback(self, future):
         goal_handle = future.result()
@@ -264,7 +317,7 @@ class FollowWaypointsClient(Node):
 
     def get_result_callback(self, future):
         result = future.result().result
-        logger.info('Result: %s', result.missed_waypoints)
+        logger.info(f'Result: {result.missed_waypoints}')
         try:
             if self.connected and self.ws:
                 result_message = json.dumps({
@@ -276,16 +329,26 @@ class FollowWaypointsClient(Node):
                 logger.info('Sent result back to WebSocket server')
             else:
                 logger.warning('WebSocket not available to send result')
+                # Queue the message for later sending
+                ws_message = {
+                    'type': 'waypoint_result',
+                    'order': self.current_order_id,
+                    'sequence': result.missed_waypoints.tolist()
+                }
+                self.ws_message_queue.put(ws_message)
+                logger.info('Queued result message for later sending')
         except Exception as e:
-            logger.error('Failed to send result over WebSocket: %s', e)
+            logger.error(f'Failed to send result over WebSocket: {e}')
 
     def destroy(self):
+        logger.info("Shutting down WebSocket connection...")
         self.should_reconnect = False
         if self.ws:
             self.ws.close()
         if self.ws_thread and self.ws_thread.is_alive():
-            self.ws_thread.join(timeout=1.0)
-            logger.info("WebSocket thread joined the main")
+            logger.info("Waiting for WebSocket thread to terminate...")
+            self.ws_thread.join(timeout=2.0)
+            logger.info("WebSocket thread terminated")
 
 def create_pose(x, y, theta):
     pose = PoseStamped()
@@ -307,6 +370,8 @@ def main(args=None):
 
     try:
         rclpy.spin(client)
+    except Exception as e:
+        logger.info("External shutdown detected. Cleaning up...")
     except KeyboardInterrupt:
         logger.info("\nShutting down gracefully...")
     finally:
