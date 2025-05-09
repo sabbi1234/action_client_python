@@ -237,7 +237,41 @@ class FollowWaypointsClient(Node):
             result = future.result()
             if result.accepted:
                 logger.info("Navigation goal accepted. Waiting for result...")
-                result.get_result_async().add_done_callback(lambda r: logger.info("Reached cancel pose."))
+                result_get_result_future = result.get_result_async()
+                
+                def on_nav_result(future):
+                    try:
+                        nav_result = future.result().result
+                        status = future.result().status  # goal status (int enum)
+                        if status == 4:  # SUCCEEDED
+                            logger.info("Reached cancel pose.")
+                            status_sent = 'SUCCEEDED'
+                        elif status == 5:  # CANCELED
+                            logger.warning("Navigation goal was canceled.")
+                        elif status == 6:  # ABORTED
+                            logger.error("Navigation goal was aborted.")
+                            status_sent = 'ABORTED'
+                        else:
+                            logger.warning(f"Navigation goal ended with unknown status: {status}")
+
+                        completion_msg = {
+                            'type': 'return_to_chef',
+                            'order': self.current_order_id,
+                            'status':status_sent
+                        }
+                        
+                        if self.connected and self.ws:
+                            self.ws.send(json.dumps(completion_msg))
+                            logger.info("Sent cancel completion message to WebSocket server")
+                        else:
+                            # Queue the message if WebSocket isn't available
+                            self.ws_message_queue.put(completion_msg)
+                            logger.info("Queued cancel completion message for later sending")
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing navigation result: {e}")
+                            
+                result_get_result_future.add_done_callback(on_nav_result)
             else:
                 logger.warning("Navigation goal to cancel pose was rejected.")
 
@@ -329,7 +363,6 @@ class FollowWaypointsClient(Node):
                 logger.info('Sent result back to WebSocket server')
             else:
                 logger.warning('WebSocket not available to send result')
-                # Queue the message for later sending
                 ws_message = {
                     'type': 'waypoint_result',
                     'order': self.current_order_id,
