@@ -48,7 +48,7 @@ console_formatter = ColorFormatter(
 )
 
 file_handler = logging.FileHandler(
-    filename='/home/greenquest/Documents/bt_tree/src/action_client_python/scripts/action_client.log',
+    filename='/home/sabbi/ros_link/rlog/action_client.log',
     mode='a'
 )
 file_handler.setFormatter(file_formatter)
