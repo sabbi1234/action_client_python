@@ -17,7 +17,7 @@ import sys
 from datetime import datetime
 import queue
 from ament_index_python.packages import get_package_share_directory
-
+import math
 class ColorFormatter(logging.Formatter):
     COLORS = {
         'DEBUG': '\033[96m',  # Light cyan
@@ -389,7 +389,8 @@ def create_pose(x, y, theta):
     pose.pose.position.x = x
     pose.pose.position.y = y
     pose.pose.position.z = 0.0
-    q = quaternion_from_euler(0, 0, theta)
+    theta_radians= math.radians(theta)
+    q = quaternion_from_euler(0, 0, theta_radians)
     pose.pose.orientation.x = q[0]
     pose.pose.orientation.y = q[1]
     pose.pose.orientation.z = q[2]
