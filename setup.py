@@ -22,7 +22,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'action_client_waypoint = action_client_python.action_waypoint:main',
+            'action_client_waypoint = action_client_python.action_waypoint_test:main',
         ],
     },
 )
